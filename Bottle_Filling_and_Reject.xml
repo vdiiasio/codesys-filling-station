@@ -1,0 +1,1244 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<project xmlns="http://www.plcopen.org/xml/tc6_0200">
+  <fileHeader companyName="" productName="CODESYS" productVersion="CODESYS V3.5 SP22 Patch 2" creationDateTime="2026-07-06T12:03:36.3136993" />
+  <contentHeader name="Bottle_Filling_and_Reject.project" modificationDateTime="2026-07-06T11:59:13.9549136">
+    <coordinateInfo>
+      <fbd>
+        <scaling x="1" y="1" />
+      </fbd>
+      <ld>
+        <scaling x="1" y="1" />
+      </ld>
+      <sfc>
+        <scaling x="1" y="1" />
+      </sfc>
+    </coordinateInfo>
+    <addData>
+      <data name="http://www.3s-software.com/plcopenxml/projectinformation" handleUnknown="implementation">
+        <ProjectInformation />
+      </data>
+    </addData>
+  </contentHeader>
+  <types>
+    <dataTypes />
+    <pous>
+      <pou name="PRG_Input" pouType="program">
+        <interface>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> PRG_INPUT
+ Scopo: Acquisizione, filtraggio e isolamento dei segnali dal campo</xhtml>
+          </documentation>
+        </interface>
+        <body>
+          <ST>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">IF NOT GVL.x_Simulation_Mode THEN
+    //MODALITÀ REALE
+    //Mappatura diretta dai morsetti fisici del PLC alle variabili logiche interne.
+    
+    //Comandi operatore (Pulsanteria fisica)
+    GVL.x_Start_Logic          := GVL.x_Start_Btn_HW;
+    GVL.x_Stop_Logic           := GVL.x_Stop_Btn_HW;         // Cablato NC sul campo
+    GVL.x_EStop_Logic          := GVL.x_EStop_Button_HW;     // Cablato NC sul campo
+    GVL.x_Reset_Logic          := GVL.x_Reset_Btn_HW;
+    
+    //Sensori digitali di campo
+    GVL.x_Filling_Sensor_Logic := GVL.x_Filling_Sensor_HW;
+    GVL.x_Scale_Sensor_Logic   := GVL.x_Scale_Sensor_HW;
+    GVL.x_Reject_Sensor_Logic  := GVL.x_Reject_Sensor_HW;
+    GVL.x_Cylinder_Retracted_Logic := GVL.x_Cylinder_Retracted_HW;
+
+ELSE
+    //MODALITÀ SIMULAZIONE
+    GVL.x_Start_Logic          := GVL.x_Start_Btn_HW;
+    GVL.x_Stop_Logic           := GVL.x_Stop_Btn_HW;
+    GVL.x_EStop_Logic          := GVL.x_EStop_Button_HW;
+    GVL.x_Reset_Logic          := GVL.x_Reset_Btn_HW;
+END_IF
+
+</xhtml>
+          </ST>
+        </body>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>bd371bd1-9995-422d-b51d-619b13f48db5</ObjectId>
+          </data>
+        </addData>
+      </pou>
+      <pou name="PRG_Core" pouType="program">
+        <interface>
+          <localVars>
+            <variable name="trig_Start">
+              <type>
+                <derived name="R_TRIG" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml">rileva il fronte di salita (pressione) del tasto Start</xhtml>
+              </documentation>
+            </variable>
+            <variable name="trig_Stop">
+              <type>
+                <derived name="F_TRIG" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml"> rileva il fronte di discesa (apertura contatto NC) del tasto Stop</xhtml>
+              </documentation>
+            </variable>
+            <variable name="fb_FillingTimer">
+              <type>
+                <derived name="TON" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml">gestisce il tempo di apertura valvola di dosaggio</xhtml>
+              </documentation>
+            </variable>
+            <variable name="fb_RejectTimer">
+              <type>
+                <derived name="TON" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml">garantisce che il cilindro pneumatico completi l'intera corsa</xhtml>
+              </documentation>
+            </variable>
+          </localVars>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">PRG_CORE
+Scopo: gestisce la Macchina a Stati Finita (FSM) </xhtml>
+          </documentation>
+        </interface>
+        <body>
+          <ST>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">
+//GENERATORE TRIGGERS E INTERBLOCCHI HMI
+trig_Start(CLK := GVL.x_Start_Logic);
+trig_Stop(CLK := GVL.x_Stop_Logic);
+
+//gestione "Fermata Dolce" e reset grafico della pulsantiera
+IF trig_Start.Q THEN
+    GVL.x_Stop_Btn_HW := TRUE;        //rilascia graficamente il tasto di Stop (NC)
+    GVL.x_Stop_Requested := FALSE;    //annulla un'eventuale richiesta di fermata a fine ciclo precedente
+END_IF
+
+IF trig_Stop.Q THEN
+    GVL.x_Start_Btn_HW := FALSE;      //sgancia graficamente il tasto di Start per evitare stalli
+END_IF
+
+//GESTIONE DELLA SICUREZZA E ALLARMI MACCHINA
+IF NOT GVL.x_EStop_Logic THEN
+    //emergenza fisica
+    GVL.e_CurrentState := E_MachineState.STATE_EMERGENCY;
+    GVL.w_Active_Alarm_ID := 101;
+    GVL.s_Active_Alarm_Msg := 'AL_101: EMERGENZA ATTIVA - Fungo premuto!';
+    GVL.x_Reject_In_Progress := FALSE; 
+    
+ELSIF GVL.x_Alm_Too_Many_Rejects THEN
+    //allarme qualità
+    GVL.e_CurrentState := E_MachineState.STATE_EMERGENCY;
+    GVL.w_Active_Alarm_ID := 102;
+    
+    //guida operatore dinamica: obbliga il passaggio in MANUALE per il riarmo
+    IF NOT GVL.x_Key_Switch_Maint THEN
+        IF GVL.x_Reset_Logic THEN
+            GVL.s_Active_Alarm_Msg := 'AL_102: ERRORE! Passare in MANUALE prima di premere Reset!';
+        ELSE
+            GVL.s_Active_Alarm_Msg := 'AL_102: INTERBLOCCO - 3 scarti! Passare in MANUALE per riarmare.';
+        END_IF
+    ELSE
+        GVL.s_Active_Alarm_Msg := 'AL_102: MANUALE inserito. Premere RESET per ripartire.';
+    END_IF
+    
+ELSIF GVL.e_CurrentState = E_MachineState.STATE_EMERGENCY THEN
+    //attesa riarmo 
+    GVL.w_Active_Alarm_ID := 100;
+    GVL.s_Active_Alarm_Msg := 'AL_100: SICUREZZE APERTE - In attesa di RESET.';
+ELSE
+    //condizione nominale
+    GVL.w_Active_Alarm_ID := 0;
+    GVL.s_Active_Alarm_Msg := 'Nessun Allarme - Linea in Sicurezza';
+END_IF
+
+//routine di riarmo
+IF GVL.x_Reset_Logic AND GVL.x_EStop_Logic THEN
+    
+    //riarmo condizionato per allarme scarti 
+    IF GVL.x_Alm_Too_Many_Rejects THEN
+        IF GVL.x_Key_Switch_Maint THEN
+            GVL.x_Alm_Too_Many_Rejects := FALSE;
+            GVL.di_Consecutive_Rejects := 0;
+        END_IF
+    ELSE
+        //reset standard di sicurezza 
+        GVL.di_Consecutive_Rejects := 0; 
+    END_IF
+    
+    GVL.x_Reject_In_Progress := FALSE;
+    
+    //riporta la macchina allo stato iniziale solo se non ci sono allarmi pendenti
+    IF GVL.e_CurrentState = E_MachineState.STATE_EMERGENCY AND NOT GVL.x_Alm_Too_Many_Rejects THEN
+        GVL.e_CurrentState := E_MachineState.STATE_INIT;
+    END_IF
+    
+    GVL.x_Reset_Btn_HW := FALSE; //reset trigger per evitare riarmi ciclici
+END_IF
+
+//richiesta di Fermata Dolce (il ciclo in corso si concluderà ordinatamente)
+IF NOT GVL.x_Stop_Logic THEN
+    GVL.x_Stop_Requested := TRUE;
+END_IF
+
+//MACCHINA A STATI FINITA (FSM - Modalità Automatica)
+IF NOT GVL.x_Key_Switch_Maint THEN 
+
+    CASE GVL.e_CurrentState OF
+
+        E_MachineState.STATE_INIT:
+            GVL.s_PackML_State := 'STOPPED';
+            GVL.x_Stop_Requested := FALSE;
+            //interblocco di partenza: La macchina si arma solo a sicurezze ok e cilindro a riposo
+            IF GVL.x_EStop_Logic AND GVL.x_Cylinder_Retracted_Logic AND NOT GVL.x_Alm_Too_Many_Rejects THEN
+                GVL.e_CurrentState := E_MachineState.STATE_IDLE;
+            END_IF
+
+        E_MachineState.STATE_IDLE:
+            GVL.s_PackML_State := 'IDLE';
+            //reset variabili di tracking flacone
+            GVL.di_Bottle_X_Pos := 0;
+            GVL.di_Bottle_Y_Pos := 0;
+            GVL.di_Bottle_Level := 0;
+            GVL.x_Bottle_Falling := FALSE;
+            GVL.x_Reject_In_Progress := FALSE;
+            
+            //transizione avviata dall'operatore
+            IF GVL.x_Start_Logic AND NOT GVL.x_Stop_Requested THEN
+                GVL.e_CurrentState := E_MachineState.STATE_CONVEYOR_RUN;
+            END_IF
+
+        E_MachineState.STATE_CONVEYOR_RUN:
+            GVL.s_PackML_State := 'EXECUTE - RUNNING';
+            IF GVL.x_Filling_Sensor_Logic AND NOT GVL.x_Bottle_Falling THEN
+                GVL.e_CurrentState := E_MachineState.STATE_FILLING;
+            END_IF
+
+        E_MachineState.STATE_FILLING:
+            GVL.s_PackML_State := 'EXECUTE - FILLING';
+            IF fb_FillingTimer.Q THEN //attende la fine del dosaggio prima di avanzare
+                GVL.e_CurrentState := E_MachineState.STATE_CHECK_WEIGHT;
+            END_IF
+
+        E_MachineState.STATE_CHECK_WEIGHT:
+            GVL.s_PackML_State := 'EXECUTE - WEIGHING';
+            //l'acquisizione del peso reale è demandata a PRG_Input. 
+            //la FSM passa la responsabilità dello scarto alla stazione successiva.
+            IF GVL.x_Scale_Sensor_Logic THEN
+                GVL.e_CurrentState := E_MachineState.STATE_REJECT_VERIFY;
+            END_IF
+            
+        E_MachineState.STATE_REJECT_VERIFY:
+            GVL.s_PackML_State := 'EXECUTE - REJECT VERIFY';
+            
+            IF NOT GVL.x_Reject_In_Progress THEN
+                IF GVL.x_Reject_Sensor_Logic THEN
+                    
+                    IF GVL.x_Bottle_Is_Good THEN
+                        //FLACONE CONFORME: aggiornamento immediato KPI e ripartenza
+                        GVL.di_Total_Bottles := GVL.di_Total_Bottles + 1;
+                        GVL.di_Good_Bottles := GVL.di_Good_Bottles + 1;
+                        GVL.di_Consecutive_Rejects := 0; 
+                        
+                        IF GVL.di_Total_Bottles &gt; 0 THEN
+                            GVL.r_Reject_Rate := (DINT_TO_REAL(GVL.di_Rejected_Bottles) / DINT_TO_REAL(GVL.di_Total_Bottles)) * 100.0;
+                        END_IF
+                        
+                        //valutazione richiesta di "Fermata Dolce"
+                        IF GVL.x_Stop_Requested THEN
+                            GVL.e_CurrentState := E_MachineState.STATE_IDLE;
+                            GVL.x_Start_Btn_HW := FALSE; 
+                        ELSE
+                            GVL.e_CurrentState := E_MachineState.STATE_CONVEYOR_RUN;
+                        END_IF
+                    ELSE
+                        //FLACONE NON CONFORME: innesca il ciclo pneumatico di scarto
+                        GVL.x_Reject_In_Progress := TRUE;
+                    END_IF
+                    
+                END_IF
+            ELSE
+                //ATTESA COMPLETAMENTO SCARTO: il codice aspetta asincronamente la fine 
+                //della corsa del cilindro prima di aggiornare i contatori ed eventualmente bloccarsi.
+                IF fb_RejectTimer.Q THEN
+                    GVL.x_Reject_In_Progress := FALSE; 
+                    
+                    //aggiornamento KPI post-caduta fisica del pezzo
+                    GVL.di_Total_Bottles := GVL.di_Total_Bottles + 1;
+                    GVL.di_Rejected_Bottles := GVL.di_Rejected_Bottles + 1;
+                    GVL.di_Consecutive_Rejects := GVL.di_Consecutive_Rejects + 1;
+                    
+                    IF GVL.di_Total_Bottles &gt; 0 THEN
+                        GVL.r_Reject_Rate := (DINT_TO_REAL(GVL.di_Rejected_Bottles) / DINT_TO_REAL(GVL.di_Total_Bottles)) * 100.0;
+                    END_IF
+                    
+                    //valutazione ritardata dell'interblocco (Allarme Max Scarti)
+                    IF GVL.di_Consecutive_Rejects &gt;= 3 THEN
+                        GVL.x_Alm_Too_Many_Rejects := TRUE;
+                    ELSE
+                        IF GVL.x_Stop_Requested THEN
+                            GVL.e_CurrentState := E_MachineState.STATE_IDLE;
+                            GVL.x_Start_Btn_HW := FALSE; 
+                        ELSE
+                            GVL.e_CurrentState := E_MachineState.STATE_CONVEYOR_RUN;
+                        END_IF
+                    END_IF
+                END_IF
+            END_IF
+
+        E_MachineState.STATE_EMERGENCY:
+            GVL.s_PackML_State := 'ABORTED';
+            IF GVL.x_EStop_Logic AND GVL.x_Reset_Logic AND NOT GVL.x_Alm_Too_Many_Rejects THEN
+                GVL.e_CurrentState := E_MachineState.STATE_INIT;
+            END_IF
+
+    END_CASE
+
+ELSE
+    //GESTIONE MANUALE (JOG)
+    //sospende la FSM automatica forzandola in uno stato sicuro di attesa.
+    GVL.s_PackML_State := 'MANUAL_MODE';
+    
+    IF GVL.e_CurrentState &lt;&gt; E_MachineState.STATE_EMERGENCY THEN
+        GVL.e_CurrentState := E_MachineState.STATE_IDLE;
+    END_IF
+    
+END_IF
+
+//AGGIORNAMENTO TIMER E CONVERSIONE RICETTE
+//converte il Setpoint (Secondi) inserito a pannello nel formato nativo TIME
+GVL.t_FillingDuration := DINT_TO_TIME(GVL.di_Set_Time_Sec * 1000);
+
+fb_FillingTimer(
+    IN := (GVL.e_CurrentState = E_MachineState.STATE_FILLING), 
+    PT := GVL.t_FillingDuration);
+
+fb_RejectTimer(
+    IN := GVL.x_Reject_In_Progress, 
+    PT := GVL.t_RejectDuration);
+
+//SCRITTURA BUFFER USCITE LOGICHE (Data Decoupling)
+//la FSM non comanda direttamente i relè, ma compila un registro di intenzioni.
+//garantisce che non ci siano uscite eccitate in conflitto in più punti del codice.
+IF GVL.e_CurrentState &lt;&gt; E_MachineState.STATE_EMERGENCY THEN
+    IF NOT GVL.x_Key_Switch_Maint THEN
+        //LOGICA AUTO
+        GVL.x_Cmd_Motor_Logic  := (GVL.e_CurrentState = E_MachineState.STATE_CONVEYOR_RUN) OR 
+                                  (GVL.e_CurrentState = E_MachineState.STATE_CHECK_WEIGHT) OR
+                                  (GVL.e_CurrentState = E_MachineState.STATE_REJECT_VERIFY AND NOT GVL.x_Reject_In_Progress);
+                                     
+        GVL.x_Cmd_Valve_Logic   := (GVL.e_CurrentState = E_MachineState.STATE_FILLING);
+        GVL.x_Cmd_Cylinder_Logic := GVL.x_Reject_In_Progress;
+    ELSE
+        //LOGICA MANUALE (Con interblocchi di sicurezza)
+        //es: nastro fermo se la valvola è aperta; dosatore inibito se manca il flacone.
+        GVL.x_Cmd_Motor_Logic  := GVL.x_Man_Cmd_Conveyor AND NOT GVL.x_Cmd_Valve_Logic; 
+        GVL.x_Cmd_Valve_Logic   := GVL.x_Man_Cmd_Valve AND GVL.x_Filling_Sensor_Logic;        
+        GVL.x_Cmd_Cylinder_Logic := GVL.x_Man_Cmd_Cylinder;
+    END_IF
+ELSE
+    //TAGLIO POTENZA IN EMERGENZA (Fail-Safe)
+    GVL.x_Cmd_Motor_Logic  := FALSE;
+    GVL.x_Cmd_Valve_Logic   := FALSE;
+    GVL.x_Cmd_Cylinder_Logic := FALSE;
+END_IF</xhtml>
+          </ST>
+        </body>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>6aeb1a15-beb0-4e55-b132-a7b5ffd56aeb</ObjectId>
+          </data>
+        </addData>
+      </pou>
+      <pou name="PRG_Output" pouType="program">
+        <interface>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">PRG_OUTPUT
+Scopo: assegnazione finale degli stati logici alle schede fisiche (DO/AO).
+Completa il pattern di disaccoppiamento HW/SW, garantendo un unico punto 
+di scrittura per le uscite verso il campo (Relè, Teleruttori, Elettrovalvole).</xhtml>
+          </documentation>
+        </interface>
+        <body>
+          <ST>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">
+//DISACCOPPIAMENTO ATTUATORI (Fail-Safe per Virtual Commissioning)
+IF NOT GVL.x_Simulation_Mode THEN
+    //MODALITÀ REALE
+    //Trasferimento dei comandi calcolati in PRG_Core ai morsetti fisici (%QX)
+    GVL.x_Cmd_Motor_HW    := GVL.x_Cmd_Motor_Logic;
+    GVL.x_Cmd_Valve_HW    := GVL.x_Cmd_Valve_Logic;
+    GVL.x_Cmd_Cylinder_HW := GVL.x_Cmd_Cylinder_Logic;
+ELSE
+    //MODALITÀ SIMULAZIONE
+    //Sicurezza HIL (Hardware-In-the-Loop): Se il programma gira in simulazione 
+    //su un PLC fisicamente cablato all'impianto, forza a zero i relè fisici.
+    //Impedisce partenze accidentali della meccanica reale evitando danni.
+    GVL.x_Cmd_Motor_HW    := FALSE;
+    GVL.x_Cmd_Valve_HW    := FALSE;
+    GVL.x_Cmd_Cylinder_HW := FALSE;
+END_IF
+
+//GESTIONE SEGNALAZIONI VISIVE (Torretta luminosa / HMI)
+//Le segnalazioni ottiche non generano movimenti pericolosi, quindi 
+//vengono aggiornate a prescindere dalla modalità (Reale/Simulazione).
+IF GVL.e_CurrentState &lt;&gt; E_MachineState.STATE_EMERGENCY THEN
+    GVL.x_Light_Ok_HW        := TRUE;     //luce Verde: Macchina sicura o in marcia
+    GVL.x_Light_Alarm_HW     := FALSE;
+ELSE
+    GVL.x_Light_Ok_HW        := FALSE;
+    GVL.x_Light_Alarm_HW     := TRUE;     //luce Rossa: Emergenza o blocco sicurezza
+END_IF
+</xhtml>
+          </ST>
+        </body>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>1a339eeb-831f-4e3c-b546-bd660c84e0a2</ObjectId>
+          </data>
+        </addData>
+      </pou>
+      <pou name="PRG_Sim" pouType="program">
+        <interface>
+          <localVars>
+            <variable name="di_Scan_Counter">
+              <type>
+                <DINT />
+              </type>
+              <initialValue>
+                <simpleValue value="0" />
+              </initialValue>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml"> Base tempi (Heartbeat) usata per la generazione del rumore bianco</xhtml>
+              </documentation>
+            </variable>
+            <variable name="fb_Hmi_Scale_Led">
+              <type>
+                <derived name="TOF" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml"> Timer Off-Delay per il pulse-stretching visivo del sensore bilancia</xhtml>
+              </documentation>
+            </variable>
+            <variable name="fb_Hmi_Reject_Led">
+              <type>
+                <derived name="TOF" />
+              </type>
+              <documentation>
+                <xhtml xmlns="http://www.w3.org/1999/xhtml"> Timer Off-Delay per il pulse-stretching visivo del sensore scarto</xhtml>
+              </documentation>
+            </variable>
+          </localVars>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">PRG_SIM
+Scopo: creare un Digital Twin della macchina. Modello cinematico, generazione fisica 
+ dei segnali e fault injection per il collaudo della logica senza hardware.</xhtml>
+          </documentation>
+        </interface>
+        <body>
+          <ST>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">//Avanzamento del clock di simulazione (sospeso in caso di emergenza)
+IF GVL.e_CurrentState &lt;&gt; E_MachineState.STATE_EMERGENCY THEN
+    di_Scan_Counter := di_Scan_Counter + 1; 
+END_IF
+
+//MOTORE GRAFICO E CINEMATICO (Eseguito solo in x_Simulation_Mode)
+IF GVL.x_Simulation_Mode THEN
+
+    //Reset posizione: simula il ricircolo continuo (loop) dei flaconi sulla linea
+    IF GVL.di_Bottle_X_Pos &gt; 700 THEN
+        GVL.di_Bottle_X_Pos := 0;
+        GVL.di_Bottle_Y_Pos := 0;
+        GVL.di_Bottle_Level := 0;
+    END_IF
+
+    //Cinematica nastro: Avanzamento micrometrico in JOG (1px) o marcia automatica (4px)
+    IF GVL.x_Cmd_Motor_Logic AND NOT GVL.x_Bottle_Falling THEN
+        IF GVL.x_Key_Switch_Maint THEN
+            GVL.di_Bottle_X_Pos := GVL.di_Bottle_X_Pos + 1; 
+        ELSE
+            GVL.di_Bottle_X_Pos := GVL.di_Bottle_X_Pos + 4; 
+        END_IF
+    END_IF
+
+    //Simulazione dei sensori ottici a sbarramento
+    //L'uso di ABS simula l'ingombro fisico del flacone (Beam Width).
+    //L'interblocco (Y = 0) impedisce false letture mentre il flacone cade nel cesto scarti.
+    GVL.x_Filling_Sensor_Logic := (ABS(GVL.di_Bottle_X_Pos - GVL.di_Pos_Sensor_Fill) &lt;= GVL.di_Sensor_Beam_Width) AND (GVL.di_Bottle_Y_Pos = 0);
+    GVL.x_Scale_Sensor_Logic   := (ABS(GVL.di_Bottle_X_Pos - GVL.di_Pos_Sensor_Scale) &lt;= GVL.di_Sensor_Beam_Width) AND (GVL.di_Bottle_Y_Pos = 0);
+    GVL.x_Reject_Sensor_Logic  := (ABS(GVL.di_Bottle_X_Pos - GVL.di_Pos_Sensor_Reject) &lt;= GVL.di_Sensor_Beam_Width) AND (GVL.di_Bottle_Y_Pos = 0);
+
+    //Simulazione fluidodinamica (Riempimento proporzionale)
+    IF GVL.x_Cmd_Valve_Logic THEN
+        IF NOT GVL.x_Key_Switch_Maint THEN
+            //In AUTO: calcola il livello in base al tempo trascorso (ET / PT)
+            IF GVL.t_FillingDuration &gt; T#0S THEN
+                GVL.di_Bottle_Level := TIME_TO_DINT(PRG_Core.fb_FillingTimer.ET) * 100 / TIME_TO_DINT(GVL.t_FillingDuration);
+            END_IF
+        ELSE
+            //In MANUALE: incremento progressivo a comando operatore
+            IF GVL.di_Bottle_Level &lt; 100 THEN
+                GVL.di_Bottle_Level := GVL.di_Bottle_Level + 1;
+            END_IF
+        END_IF
+    END_IF
+
+    //Simulazione cinematica attuatore pneumatico
+    //Gli incrementi a step (+ o - 10) simulano il tempo fisico di estensione/ritrazione dello stelo
+    IF GVL.x_Cmd_Cylinder_Logic THEN
+        IF GVL.di_Cylinder_Stroke &lt; 100 THEN
+            GVL.di_Cylinder_Stroke := GVL.di_Cylinder_Stroke + 10;
+        END_IF
+    ELSE
+        IF GVL.di_Cylinder_Stroke &gt; 0 THEN
+            GVL.di_Cylinder_Stroke := GVL.di_Cylinder_Stroke - 10;
+        END_IF
+    END_IF
+
+    //Simulazione sensore magnetico di finecorsa (Cilindro a riposo)
+    GVL.x_Cylinder_Retracted_Logic := (GVL.di_Cylinder_Stroke = 0);
+
+    //Motore fisico: Valutazione collisione per lo scarto
+    //Se lo stelo colpisce il flacone in corrispondenza del sensore, innesca la caduta
+    IF (GVL.di_Cylinder_Stroke &gt; 50) AND (ABS(GVL.di_Bottle_X_Pos - GVL.di_Pos_Sensor_Reject) &lt;= 40) AND (GVL.di_Bottle_Y_Pos = 0) THEN
+        GVL.x_Bottle_Falling := TRUE;
+    END_IF
+
+    //Gestione della gravità (Asse Y)
+    IF GVL.x_Bottle_Falling THEN
+        GVL.di_Bottle_Y_Pos := GVL.di_Bottle_Y_Pos + 5; 
+        
+        IF GVL.di_Bottle_Y_Pos &gt; 100 THEN
+            GVL.x_Bottle_Falling := FALSE;
+            GVL.di_Bottle_X_Pos := 0;
+            GVL.di_Bottle_Y_Pos := 0;
+            GVL.di_Bottle_Level := 0;
+        END_IF
+    END_IF
+
+    //CALCOLO PESO E FAULT INJECTION (DIGITAL TWIN BILANCIA)
+    IF GVL.x_Scale_Sensor_Logic THEN
+        //Calcolo peso teorico con aggiunta di rumore bianco (SIN) per simulare le vibrazioni industriali
+        GVL.r_Measured_Weight := (DINT_TO_REAL(GVL.di_Bottle_Level) / 100.0 * GVL.r_Target_Weight) + (SIN(DINT_TO_REAL(di_Scan_Counter)) * 1.5);
+        
+        //INIEZIONE DETERMINISTICA DEI GUASTI
+        //Sottodosa volutamente (-5g) i flaconi numero 7, 8 e 9 di ogni ciclo da 10
+        //per innescare l'allarme 'AL_102' (3 scarti consecutivi) ai fini del testing
+        IF (GVL.di_Total_Bottles MOD 10 = 7) OR 
+           (GVL.di_Total_Bottles MOD 10 = 8) OR 
+           (GVL.di_Total_Bottles MOD 10 = 9) THEN
+            
+            GVL.r_Measured_Weight := GVL.r_Measured_Weight - 5.0; 
+        END_IF
+        
+    ELSIF GVL.di_Bottle_X_Pos &lt; 200 THEN
+        GVL.r_Measured_Weight := 0.0;
+    END_IF
+    
+END_IF 
+
+// GESTIONE SEGNALAZIONI E DIAGNOSTICA HMI
+//Valutazione dei limiti di Specifica (USL/LSL)
+GVL.x_Bottle_Is_Good := (GVL.r_Measured_Weight &gt;= GVL.r_Tolerance_Min) AND (GVL.r_Measured_Weight &lt;= GVL.r_Tolerance_Max);
+
+//Generazione dinamica dei banner testuali per l'interfaccia operatore
+IF GVL.r_Measured_Weight = 0.0 THEN
+    GVL.s_Last_Reject_Reason := 'In attesa flacone...';
+ELSE
+    IF GVL.x_Key_Switch_Maint THEN
+        IF GVL.x_Bottle_Is_Good THEN
+            GVL.s_Last_Reject_Reason := 'OK: Conforme (Taratura)';
+        ELSIF GVL.r_Measured_Weight &lt; GVL.r_Tolerance_Min THEN
+            GVL.s_Last_Reject_Reason := 'WRN_Q01: Sottodosaggio';
+        ELSE
+            GVL.s_Last_Reject_Reason := 'WRN_Q02: Sovradosaggio';
+        END_IF
+    ELSE
+        IF GVL.e_CurrentState = E_MachineState.STATE_FILLING THEN
+            GVL.s_Last_Reject_Reason := 'Dosaggio in corso...';
+        ELSIF (GVL.e_CurrentState = E_MachineState.STATE_CHECK_WEIGHT) AND NOT GVL.x_Scale_Sensor_Logic THEN
+            GVL.s_Last_Reject_Reason := 'In transito verso bilancia...';
+        ELSIF GVL.x_Scale_Sensor_Logic THEN
+            IF GVL.x_Bottle_Is_Good THEN
+                GVL.s_Last_Reject_Reason := 'OK: Prodotto Conforme';
+            ELSIF GVL.r_Measured_Weight &lt; GVL.r_Tolerance_Min THEN
+                GVL.s_Last_Reject_Reason := 'WRN_Q01: Sottodosaggio (Sotto LSL)';
+            ELSE
+                GVL.s_Last_Reject_Reason := 'WRN_Q02: Sovradosaggio (Sopra USL)';
+            END_IF
+        END_IF
+    END_IF
+END_IF
+
+//HMI PULSE STRETCHING
+//Congela l'uscita a TRUE per 500ms permettendo all'occhio umano di vedere 
+//l'accensione dei LED anche con transiti del flacone molto rapidi
+fb_Hmi_Scale_Led(IN := GVL.x_Scale_Sensor_Logic, PT := T#500MS);
+GVL.x_Hmi_Scale_Vis := fb_Hmi_Scale_Led.Q;
+
+fb_Hmi_Reject_Led(IN := GVL.x_Reject_Sensor_Logic, PT := T#500MS);
+GVL.x_Hmi_Reject_Vis := fb_Hmi_Reject_Led.Q;</xhtml>
+          </ST>
+        </body>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>348c535c-5c56-4adb-9a45-771fac7a4860</ObjectId>
+          </data>
+        </addData>
+      </pou>
+      <pou name="PLC_PRG" pouType="program">
+        <interface>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> MAIN - PLC_PRG
+ Scopo: Task manager </xhtml>
+          </documentation>
+        </interface>
+        <body>
+          <ST>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml">
+PRG_Input();
+PRG_Sim();
+PRG_Core();
+PRG_Output();</xhtml>
+          </ST>
+        </body>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>757e2bf1-550f-4e50-906c-1950dcd2a6d2</ObjectId>
+          </data>
+        </addData>
+      </pou>
+    </pous>
+  </types>
+  <instances>
+    <configurations />
+  </instances>
+  <addData>
+    <data name="http://www.3s-software.com/plcopenxml/globalvars" handleUnknown="implementation">
+      <globalVars name="GVL">
+        <variable name="x_Start_Btn_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando fisico di avvio ciclo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Stop_Btn_HW">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="TRUE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando fisico di arresto ciclo (NC)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_EStop_Button_HW">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="TRUE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Fungo fisico di emergenza linea (NC)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Reset_Btn_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Pulsante fisico riarmo anomalie</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Filling_Sensor_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Fotocellula reale presenza flacone </xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Scale_Sensor_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Sensore reale presenza su bilancia </xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Reject_Sensor_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Fotocellula reale stazione scarto </xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cylinder_Retracted_HW">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="TRUE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Finecorsa magnetico reale cilindro a riposo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Start_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico avvio ciclo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Stop_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico arresto ciclo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_EStop_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico catena di emergenza</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Reset_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico comando riarmo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Filling_Sensor_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico sensore riempimento</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Scale_Sensor_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico sensore pesatura</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Reject_Sensor_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico sensore scarto</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cylinder_Retracted_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="TRUE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato logico finecorsa cilindro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Key_Switch_Maint">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="FALSE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Selettore a chiave JOG MANUALE (TRUE) o AUTO (FALSE)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Simulation_Mode">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="TRUE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Bypass hardware per Digital Twin</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Motor_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando logico nastro trasportatore</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Valve_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando logico valvola erogazione</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Cylinder_Logic">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando logico cilindro espulsione</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Motor_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando teleruttore motore nastro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Valve_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando elettrovalvola erogazione</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Cmd_Cylinder_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Comando elettrovalvola cilindro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Light_Ok_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Torretta verde (Macchina Pronta/In marcia)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Light_Alarm_HW">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Torretta rossa (Allarme/Emergenza attiva)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="e_CurrentState">
+          <type>
+            <derived name="E_MachineState" />
+          </type>
+          <initialValue>
+            <simpleValue value="E_MachineState.STATE_INIT" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato FSM</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Bottle_Is_Good">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Esito ispezione: TRUE se flacone in tolleranza</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Stop_Requested">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="FALSE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Flag richiesta fermata dolce a fine ciclo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Reject_In_Progress">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="FALSE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Flag ciclo scarto pneumatico in corso</xhtml>
+          </documentation>
+        </variable>
+        <variable name="s_Active_Alarm_Msg">
+          <type>
+            <string />
+          </type>
+          <initialValue>
+            <simpleValue value="'Linea in Sicurezza'" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Banner allarmi HMI</xhtml>
+          </documentation>
+        </variable>
+        <variable name="w_Active_Alarm_ID">
+          <type>
+            <WORD />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Codice numerico allarme attivo (SCADA)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="s_PackML_State">
+          <type>
+            <string />
+          </type>
+          <initialValue>
+            <simpleValue value="'BOOT'" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Stato standard OMAC PackML</xhtml>
+          </documentation>
+        </variable>
+        <variable name="r_Target_Weight">
+          <type>
+            <REAL />
+          </type>
+          <initialValue>
+            <simpleValue value="100.0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [g] Peso nominale desiderato</xhtml>
+          </documentation>
+        </variable>
+        <variable name="r_Tolerance_Min">
+          <type>
+            <REAL />
+          </type>
+          <initialValue>
+            <simpleValue value="98.5" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [g] LSL: Limite inferiore tolleranza</xhtml>
+          </documentation>
+        </variable>
+        <variable name="r_Tolerance_Max">
+          <type>
+            <REAL />
+          </type>
+          <initialValue>
+            <simpleValue value="102.5" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [g] USL: Limite superiore tolleranza</xhtml>
+          </documentation>
+        </variable>
+        <variable name="r_Measured_Weight">
+          <type>
+            <REAL />
+          </type>
+          <initialValue>
+            <simpleValue value="0.0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [g] Peso reale analogico misurato</xhtml>
+          </documentation>
+        </variable>
+        <variable name="s_Last_Reject_Reason">
+          <type>
+            <string />
+          </type>
+          <initialValue>
+            <simpleValue value="'In attesa primo pezzo...'" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Diagnostica ultimo pezzo</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Total_Bottles">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Contatore totale flaconi processati</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Good_Bottles">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Contatore totale flaconi conformi</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Rejected_Bottles">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Contatore totale flaconi scartati</xhtml>
+          </documentation>
+        </variable>
+        <variable name="r_Reject_Rate">
+          <type>
+            <REAL />
+          </type>
+          <initialValue>
+            <simpleValue value="0.0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [%] Tasso percentuale di scarto</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Consecutive_Rejects">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Contatore buffer per scarti consecutivi</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Alm_Too_Many_Rejects">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="FALSE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Interblocco per 3 scarti consecutivi</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Man_Cmd_Conveyor">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [HMI] Override manuale JOG Nastro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Man_Cmd_Valve">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [HMI] Override manuale JOG Valvola</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Man_Cmd_Cylinder">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [HMI] Override manuale JOG Cilindro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Hmi_Scale_Vis">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Pulse Stretching per LED Bilancia HMI</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Hmi_Reject_Vis">
+          <type>
+            <BOOL />
+          </type>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Pulse Stretching per LED Scarto HMI</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Set_Time_Sec">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="3" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Ricetta] Tempo impostato dosaggio (s)</xhtml>
+          </documentation>
+        </variable>
+        <variable name="t_FillingDuration">
+          <type>
+            <TIME />
+          </type>
+          <initialValue>
+            <simpleValue value="TIME#3s0ms" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Conversione in TIME del setpoint dosaggio</xhtml>
+          </documentation>
+        </variable>
+        <variable name="t_RejectDuration">
+          <type>
+            <TIME />
+          </type>
+          <initialValue>
+            <simpleValue value="TIME#1s0ms" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Durata temporizzazione espulsione cilindro</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Pos_Sensor_Fill">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="225" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Coordinata fotocellula ugello</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Pos_Sensor_Scale">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="305" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Coordinata sensore bilancia</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Pos_Sensor_Reject">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="565" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Coordinata fotocellula espulsore</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Sensor_Beam_Width">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="10" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Raggio di attivazione sensori</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Bottle_X_Pos">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Coordinata X flacone simulato</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Bottle_Y_Pos">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [Pixel] Coordinata Y flacone simulato</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Bottle_Level">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [%] Animazione livello fluido</xhtml>
+          </documentation>
+        </variable>
+        <variable name="di_Cylinder_Stroke">
+          <type>
+            <DINT />
+          </type>
+          <initialValue>
+            <simpleValue value="0" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> [%] Animazione estensione pistone</xhtml>
+          </documentation>
+        </variable>
+        <variable name="x_Bottle_Falling">
+          <type>
+            <BOOL />
+          </type>
+          <initialValue>
+            <simpleValue value="FALSE" />
+          </initialValue>
+          <documentation>
+            <xhtml xmlns="http://www.w3.org/1999/xhtml"> Flag animazione gravità scarto</xhtml>
+          </documentation>
+        </variable>
+        <addData>
+          <data name="http://www.3s-software.com/plcopenxml/attributes" handleUnknown="implementation">
+            <Attributes>
+              <Attribute Name="qualified_only" Value="" />
+            </Attributes>
+          </data>
+          <data name="http://www.3s-software.com/plcopenxml/objectid" handleUnknown="discard">
+            <ObjectId>633b5c19-4a45-475a-bf45-62cb92b8f0ec</ObjectId>
+          </data>
+        </addData>
+        <documentation>
+          <xhtml xmlns="http://www.w3.org/1999/xhtml"> ==============================================================================
+ GVL (GLOBAL VARIABLE LIST) - Dati globali per HMI e Logica
+ ==============================================================================</xhtml>
+        </documentation>
+      </globalVars>
+    </data>
+    <data name="http://www.3s-software.com/plcopenxml/projectstructure" handleUnknown="discard">
+      <ProjectStructure>
+        <Object Name="GVL" ObjectId="633b5c19-4a45-475a-bf45-62cb92b8f0ec" />
+        <Object Name="PRG_Input" ObjectId="bd371bd1-9995-422d-b51d-619b13f48db5" />
+        <Object Name="PRG_Core" ObjectId="6aeb1a15-beb0-4e55-b132-a7b5ffd56aeb" />
+        <Object Name="PRG_Output" ObjectId="1a339eeb-831f-4e3c-b546-bd660c84e0a2" />
+        <Object Name="PRG_Sim" ObjectId="348c535c-5c56-4adb-9a45-771fac7a4860" />
+        <Object Name="PLC_PRG" ObjectId="757e2bf1-550f-4e50-906c-1950dcd2a6d2" />
+      </ProjectStructure>
+    </data>
+  </addData>
+</project>
